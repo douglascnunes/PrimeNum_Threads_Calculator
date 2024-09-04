@@ -1,0 +1,20 @@
+# Build results
+Debug/
+
+# Visual Studio files
+*.exe
+*.dll
+*.obj
+*.pdb
+*.user
+*.vcxproj.user
+*.suo
+*.ipch
+*.opendb
+*.tlog
+
+# Visual Studio Code workspace settings
+.vscode/
+
+# Ignore auto-generated files by Visual Studio
+.vs/
