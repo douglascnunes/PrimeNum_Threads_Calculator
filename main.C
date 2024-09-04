@@ -1,0 +1,502 @@
+// ALUNO: DOUGLAS CORREA NUNES.
+
+#pragma once
+#define _CRT_SECURE_NO_WARNINGS 1
+#define _WINSOCK_DEPRECATED_NO_WARNINGS 1
+
+#include <pthread.h>
+#include <semaphore.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <sched.h>
+#include <Windows.h>
+
+
+
+/*-------- Pacote dos números a serem analizados --------*/
+
+typedef struct	packNumber	// Pacote do número a ser analizado.
+{
+	int					value;						// Número.
+	int					isPrime;					// Resultado da análise, se é primo (1) ou não (>1). Também sinaliza o estouro de Buffer (-1).
+	int					round;						// Sinaliza em qual rodada o PackNumber se encontra.
+	int					analyzerThread;				// Sinaliza qual foi a thread que deteminou se o número do PackNumber é primo ou não.
+} PackNumber;
+
+
+
+/*-------- Implementação da Fila para os Buffers --------*/
+
+typedef struct node		// Pacote do Nó da Fila para Buffer.
+{
+	PackNumber* number;
+	struct node* next;
+} Node;
+
+
+typedef struct queue	// Pacote da Fila.
+{
+	Node*				front;						// Primeiro Nó da Fila.
+	Node*				rear;						// Ultimo Nó da Fila.
+	int					size;						// Tamanho atual da Queue/Buffer.
+	int*				bufferSize;					// Tamanho máximo da Queue/Buffer.
+	pthread_mutex_t		mutex;						// Mutex para controle à região crítica.
+	pthread_cond_t		full;						// Condição de Queue/Buffer cheio.
+	pthread_cond_t		empty;						// Condição de Queue/Buffer vazio.
+} Queue;
+
+
+
+/*--------------- Pacotes das Threads ---------------*/
+
+typedef struct	generator	// Pacote da Thread Geradora.
+{
+	pthread_t			threadId;
+	int*				n;							// Quantidade de números a serem analizados.
+	int*				bufferOverflow;				// Avisa se o Buffer de alguma thread deu overflow. Sem Overflow = 0, com Overflow = 1.
+	Queue*				firstThreadBuffer;			// Buffer da primeira thread.
+} Generator;
+
+typedef struct analyzer	// Pacote da Thread Analizadora.
+{
+	pthread_t			threadId;
+	int					thread_num;					// Indica o número da thread.	
+	int					isLast;						// Identifica a última Thread.
+	int*				internalBufferSize;			// Tamanho do internalBUffer;
+	int*				internalBuffer;				// Buffer interno para números primos encontrados.
+	int*				bufferOverflow;				// Avisa se o Buffer de alguma thread deu overflow. Sem Overflow = 0, com Overflow = 1.
+	Queue*				communicationBufferInput;	// Buffer de comunicação com a thread de análise anterior.
+	Queue*				communicationBufferOutput;	// Buffer de comunicação com a thread de análise posterior.
+	Queue*				receiverBuffer;				// Buffer da thread Receptora.
+	sem_t*				sendToReceiver;				// Avisa a thread Receptora que foi enviado um PackNumber;
+} Analyzer;
+
+
+typedef struct	receiver	// Pacote da Thread Receptora.
+{
+	sem_t*				sendToReceiver;				// Avisa a thread Receptora que foi enviado um PackNumber;
+	pthread_t			threadId;
+	Queue*				receiverBuffer;				// Buffer da thread Receptora.
+} Receiver;
+
+
+
+
+void initQueue(Queue* queue, int* bufferSize)		// Inicializar a Fila.
+{
+	queue->front = NULL;
+	queue->rear = NULL;
+	queue->size = 0;
+	queue->bufferSize = bufferSize;
+	pthread_mutex_init(&queue->mutex, NULL);
+	pthread_cond_init(&queue->full, NULL);
+	pthread_cond_init(&queue->empty, NULL);
+}
+
+
+void enqueue(Queue* queue, PackNumber* number)
+{
+
+	pthread_mutex_lock(&queue->mutex);				// Garante acesso exclusivo à região crítica.
+
+	if (queue->size == *(queue->bufferSize))
+	{
+		pthread_cond_wait(&queue->full, &queue->mutex);		// Esperar pela remoção de um novo número.
+	}
+
+
+	Node* newNode = (Node*)malloc(sizeof(Node));
+	newNode->number = number;
+	newNode->next = NULL;
+
+
+	if (queue->size == 0)
+	{
+		queue->front = newNode;
+		queue->rear = newNode;
+	}
+	else
+	{
+		queue->rear->next = newNode;
+		queue->rear = newNode;
+	}
+	queue->size++;
+
+	pthread_mutex_unlock(&queue->mutex);			// Termina o acesso exclusivo à região crítica.
+	pthread_cond_signal(&queue->empty);				// Avisa a todos que estão esperando que o Buffer não está mais vazio.
+}
+
+
+PackNumber* dequeue(Queue* queue)
+{
+
+	pthread_mutex_lock(&queue->mutex);				// Garante acesso exclusivo à região crítica.
+
+	if (queue->size == 0)
+	{
+		pthread_cond_wait(&queue->empty, &queue->mutex);	// Esperar pela adição de um novo número.
+	}
+
+
+	Node* temp = queue->front;
+	PackNumber* data = temp->number;
+
+	queue->front = queue->front->next;
+	free(temp);
+
+	if (queue->front == NULL)
+	{
+		queue->rear = NULL;
+	}
+
+	queue->size--;
+	pthread_mutex_unlock(&queue->mutex);			// Termina o acesso exclusivo à região crítica.
+	pthread_cond_signal(&queue->full);				// Avisa a todos que estão esperando que o Buffer não está mais cheio.
+	return data;
+}
+
+PackNumber* findAndGet(Queue* queue, int findingValue)
+{
+	pthread_mutex_lock(&queue->mutex);				// Garante acesso exclusivo à região crítica.
+
+	if (queue->size == 0)		// Se a fila estiver vazia, então retorna nulo.
+	{
+		return NULL;
+	}
+
+	if (queue->front->number->value == findingValue) // Remover o primeiro PackNumber do Buffer.
+	{
+		Node* temp = queue->front;
+		queue->front = queue->front->next;
+		if (queue->front == NULL)
+		{
+			queue->rear = NULL;
+		}
+		queue->size--;
+		PackNumber* number = temp->number;
+		free(temp);
+
+		pthread_mutex_unlock(&queue->mutex);		// Achou o PackNumber desejado, então a Região Critica é Liberada.
+		return number;
+	}
+
+
+	Node* current = queue->front;
+	Node* previous = NULL;
+
+	while (current != NULL && current->number->value != findingValue)
+	{
+		previous = current;
+		current = current->next;
+	}
+
+	if (current == NULL)
+	{
+		pthread_mutex_unlock(&queue->mutex);		// PackNumber desejado não encontrado, então a Região Critica é Liberada.
+		return NULL;
+	}
+
+	previous->next = current->next;
+	if (previous->next == NULL)
+	{
+		queue->rear = previous;
+	}
+	queue->size--;
+
+	PackNumber* number = current->number;
+	free(current);
+
+	pthread_mutex_unlock(&queue->mutex);		// Achou o PackNumber desejado, então a Região Critica é Liberada.
+	return number;
+}
+
+
+int find(Queue* queue, int findingValue)
+{
+	pthread_mutex_lock(&queue->mutex);			// Garante acesso exclusivo à região crítica.
+
+	if (queue->size == 0)						// Se não houver nenhum número no Buffer, retorna 0.
+	{
+		pthread_mutex_unlock(&queue->mutex);	// Liberar a Região Crítica.
+		return 0;
+	}
+
+	Node* current = queue->front;
+
+	while (current != NULL)
+	{
+		if (current->number->value == findingValue)	// Se encontrar o número, retornar 1.
+		{
+			pthread_mutex_unlock(&queue->mutex); // Liberar a Região Crítica.
+			return 1;
+		}
+		current = current->next;
+	}
+
+	pthread_mutex_unlock(&queue->mutex);		// Liberar a Região Crítica.
+	return 0;									// Valor não encontrado, retorna 0.
+}
+
+
+
+
+
+/*------------- Funções das Threads -------------*/
+
+void* generatorAction(void* arg)
+{
+	int i;
+	Generator* g = (Generator*)arg;		// Recepcionando argumento passado pela thread_create().
+	while (1)
+	{
+		for (i = 2; i < *g->n; i++)
+		{
+			// Criar pacote de número para ser analizado.
+			PackNumber* number = (PackNumber*)malloc(sizeof(PackNumber));
+			number->value = i;
+			number->isPrime = -1;
+			number->round = 0;
+			number->analyzerThread = -1;
+
+			// Envia o pacote para o Buffer de entrada da primeira thread.
+			enqueue(g->firstThreadBuffer, number);
+
+			if (*(g->bufferOverflow))	// Se alguem estourou o Buffer, então encerrar a thread.
+			{
+				pthread_exit(0);	// Se alguem estourou o Buffer, então encerrar a thread.
+			}
+		}
+	}
+}
+
+
+
+void* analyzersAction(void* arg)
+{
+	Analyzer* a = (Analyzer*)arg;		// Recepcionando argumento passado pela thread_create().
+	while (1)
+	{
+		PackNumber* number = dequeue(a->communicationBufferInput);		// Pega o número no Buffer de Entrada para análise.
+		if (number->round <= *(a->internalBufferSize)) // Se valor esta dentro do internalBuffer nessa rodada, então:
+		{
+			if (a->internalBuffer[number->round] == -1)	// Se não há números no internalBuffer da rodada, então é primo;
+			{
+				a->internalBuffer[number->round] = number->value;
+				number->isPrime = 0;
+				number->analyzerThread = a->thread_num;
+				enqueue(a->receiverBuffer, number);
+				sem_post(a->sendToReceiver);
+			}
+
+			else if ((number->value % a->internalBuffer[number->round]) == 0) // Analisar se o numero desse pacote é divisível pelo seu primo armazenado dessa rodada.
+			{
+				number->isPrime = a->internalBuffer[number->round];
+				number->analyzerThread = a->thread_num;
+				enqueue(a->receiverBuffer, number);
+				sem_post(a->sendToReceiver);
+			}
+
+			else	// Se o não há um número no internalBuffer da rodada, porém não é divisível por ele, então é enviado para a próxima thread.
+			{
+				if (a->isLast == 1) // Se essa thread for a última, marcar o pacote do número que está na próxima rodada.
+				{
+					number->round++;
+				}
+				enqueue(a->communicationBufferOutput, number);
+			}
+		}
+		else		// OVerflow.
+		{
+			*(a->bufferOverflow) = 1;
+			number->isPrime = -1;
+			number->analyzerThread = a->thread_num;
+			enqueue(a->receiverBuffer, number);
+			pthread_exit(0);
+		}
+		if (*(a->bufferOverflow) == 1)
+		{
+			pthread_exit(0);
+		}
+	}
+}
+
+
+
+void* receiverAction(void* arg)
+{
+	int nextToPrint = 2;
+	Receiver* r = (Receiver*)arg;		// Recepcionando argumento passado pela thread_create().
+
+	while (1)
+	{
+		sem_wait(r->sendToReceiver);	// Esperar até que alguem adicione um número no Buffer na Thread Receptora.
+
+		while (find(r->receiverBuffer, nextToPrint) == 1)
+		{
+			PackNumber* number = findAndGet(r->receiverBuffer, nextToPrint);
+
+			if (number->isPrime == 0)
+			{
+				printf("%d is prime in thread %d at round %d\n", number->value, number->analyzerThread, number->round);
+			}
+			else if (number->isPrime > 1)
+			{
+				printf("%d divided by %d in thread %d at round %d\n", number->value, number->isPrime, number->analyzerThread, number->round);
+			}
+			else if (number->isPrime == -1)
+			{
+				printf("%d CAUSED INTERNAL BUFFER OVERFLOW IN thread %d at round %d\n", number->value, number->analyzerThread, number->round);
+				pthread_exit(0);	// Se alguem estourou o Buffer, então encerrar a thread
+			}
+
+			free(number);
+			nextToPrint++;		// Incrementa a variável nextToPrint para indicar que o próximo número é o desejável a ser printado.
+		}
+	}
+}
+
+
+
+
+
+int main(int argc, char** argv)
+{
+	// Declarações na Main.
+	int n, m, k, x, i = 0, bufferOverflow = 0;
+	sem_t sendToReceiver;
+
+
+	if (argc != 5)
+	{
+		printf("use ./pipelinethreads.exe <N_analyze_numbers> <M_analyze_threads> <K_comunication_buffer_size> <X_internal_buffer>.\n");
+		return 0;
+	}
+
+	n = atoi(argv[1]);	// Números a serem analisados.
+	m = atoi(argv[2]);	// Threads de análise.
+	k = atoi(argv[3]);	// Tamanho do limite do buffer de comunicação entre as threads de análise.
+	x = atoi(argv[4]);	// Tamanho do buffer interno de armazenamento de números primos.
+
+
+	// Iniciando todos os semáforos e mutex necessários.
+	sem_init(&sendToReceiver, 0, 0);
+
+
+	// Criando a thread Receptora.
+	Receiver* receiverThread = (Receiver*)malloc(sizeof(Receiver));
+	if (receiverThread == NULL)
+	{
+		return -1;
+	}
+	Queue* receiverBuffer = (Queue*)malloc(sizeof(Queue));
+	initQueue(receiverBuffer, &n);
+	receiverThread->receiverBuffer = receiverBuffer;
+	receiverThread->sendToReceiver = &sendToReceiver;
+	pthread_create(&receiverThread->threadId, NULL, receiverAction, receiverThread);
+
+
+	// Criando os pacotes das threads de Análise.
+	Analyzer* analyzers = (Analyzer*)malloc(sizeof(Analyzer) * m);
+	if (analyzers == NULL)
+	{
+		return -1;
+	}
+
+	// Criar a Queue de comunicação compartilhado entre as threads de análise.
+	int commBuffSize = k - 1;
+	Queue* communicationBuffer = (Queue*)malloc(sizeof(Queue) * m);
+	if (communicationBuffer == NULL)
+	{
+		return -1;
+	}
+	for (i = 0; i < m; i++)
+	{
+		initQueue(&communicationBuffer[i], &commBuffSize);
+	}
+
+
+	// Criar o Buffer interno de armazenamento para os número primos encontrados.
+	int** internalBuffer;
+	internalBuffer = (int**)malloc(m * sizeof(int*));
+	if (internalBuffer)
+	{
+		for (i = 0; i < m; i++)
+		{
+			internalBuffer[i] = (int*)malloc(x * sizeof(int));
+			if (internalBuffer[i])
+			{
+				for (int j = 0; j < x; j++)
+				{
+					internalBuffer[i][j] = -1;
+				}
+			}
+		}
+	}
+
+
+	// Populando as threads de análise.
+	int interBuffSize = x - 1;
+	for (i = 0; i < m; i++)
+	{
+		(analyzers + i)->sendToReceiver = &sendToReceiver;
+		(analyzers + i)->thread_num = i;
+		(analyzers + i)->isLast = (i == m - 1) ? 1 : 0;
+		(analyzers + i)->internalBufferSize = &interBuffSize;
+		(analyzers + i)->communicationBufferInput = &communicationBuffer[i];
+		(analyzers + i)->communicationBufferOutput = &communicationBuffer[(i + 1) % m];
+		(analyzers + i)->receiverBuffer = receiverBuffer;
+		(analyzers + i)->bufferOverflow = &bufferOverflow;
+		(analyzers + i)->internalBuffer = internalBuffer[i];
+	}
+
+
+	// Criando as threads de análise.
+	for (i = 0; i < m; i++)
+	{
+		pthread_create(&(analyzers + i)->threadId, NULL, analyzersAction, analyzers + i);
+	}
+
+	// Criando o pacote da thread Geradora.
+	Generator* generatorThread = (Generator*)malloc(sizeof(Generator));
+	if (generatorThread == NULL)
+	{
+		return -1;
+	}
+
+	// Populando a thread geradora.
+	generatorThread->n = &n;
+	generatorThread->firstThreadBuffer = (analyzers + 0)->communicationBufferInput;
+	generatorThread->bufferOverflow = &bufferOverflow;
+
+	pthread_create(&(generatorThread->threadId), NULL, generatorAction, generatorThread);
+
+	//Aguardando a finalização das threads de análise.
+	for (i = 0; i < m; i++) {
+		pthread_join((analyzers + i)->threadId, NULL);
+	}
+
+	// Aguardar a finalização da thread geradora.
+	pthread_join(generatorThread->threadId, NULL);
+
+	// Aguardar a finalização da thread receptora.
+	pthread_join(receiverThread->threadId, NULL);
+
+
+	/* --- Liberar toda a memória alocada das Queues, Arrays e Pacotes. --- */
+	for (i = 0; i < m; i++) {
+		free(internalBuffer[i]);
+	}
+	free(internalBuffer);
+	free(analyzers);
+	free(communicationBuffer);
+	free(receiverBuffer);
+	free(receiverThread);
+	free(generatorThread);
+
+	// Destruir o semáforo compartilhado.
+	sem_destroy(&sendToReceiver);
+
+
+	return 0;
+}
+
