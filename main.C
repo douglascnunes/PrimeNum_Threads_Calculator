@@ -53,7 +53,7 @@ typedef struct	generator	// Pacote da Thread Geradora.
 {
 	pthread_t			threadId;
 	int*				n;							// Quantidade de números a serem analizados.
-	int*				bufferOverflow;				// Avisa se o Buffer de alguma thread deu overflow. Sem Overflow = 0, com Overflow = 1.
+	int*				flagBufferOverflow;				// Avisa se o Buffer de alguma thread deu overflow. Sem Overflow = 0, com Overflow = 1.
 	Queue*				firstThreadBuffer;			// Buffer da primeira thread.
 } Generator;
 
@@ -62,9 +62,10 @@ typedef struct analyzer	// Pacote da Thread Analizadora.
 	pthread_t			threadId;
 	int					thread_num;					// Indica o número da thread.	
 	int					isLast;						// Identifica a última Thread.
-	int*				internalBufferSize;			// Tamanho do internalBUffer;
+	int*				internalBufferSize;			// Tamanho do internalBuffer;
 	int*				internalBuffer;				// Buffer interno para números primos encontrados.
-	int*				bufferOverflow;				// Avisa se o Buffer de alguma thread deu overflow. Sem Overflow = 0, com Overflow = 1.
+	int*				flagBufferOverflow;			// Avisa se o Buffer de alguma thread deu overflow. Sem Overflow = 0, com Overflow = 1.
+	int*				flagDone;					// Avisa as Threads que o trabalho está finalizado.
 	Queue*				communicationBufferInput;	// Buffer de comunicação com a thread de análise anterior.
 	Queue*				communicationBufferOutput;	// Buffer de comunicação com a thread de análise posterior.
 	Queue*				receiverBuffer;				// Buffer da thread Receptora.
@@ -77,6 +78,10 @@ typedef struct	receiver	// Pacote da Thread Receptora.
 	sem_t*				sendToReceiver;				// Avisa a thread Receptora que foi enviado um PackNumber;
 	pthread_t			threadId;
 	Queue*				receiverBuffer;				// Buffer da thread Receptora.
+	int*				n;							// Quantidade de números a serem analizados.
+	int*				m;							// Número de Threads Analizadoras.
+	int*				flagDone;					// Avisa as Threads que o trabalho está finalizado.
+	Analyzer*			analyzers;
 } Receiver;
 
 
@@ -94,7 +99,7 @@ void initQueue(Queue* queue, int* bufferSize)		// Inicializar a Fila.
 }
 
 
-void enqueue(Queue* queue, PackNumber* number)
+void enqueue(Queue* queue, PackNumber* number, int* flagDone, int* flagBufferOverflow)
 {
 
 	pthread_mutex_lock(&queue->mutex);				// Garante acesso exclusivo à região crítica.
@@ -102,6 +107,9 @@ void enqueue(Queue* queue, PackNumber* number)
 	if (queue->size == *(queue->bufferSize))
 	{
 		pthread_cond_wait(&queue->full, &queue->mutex);		// Esperar pela remoção de um novo número.
+		if (*flagDone == 1 || *flagBufferOverflow == 1) {
+			return;
+		}
 	}
 
 
@@ -127,7 +135,7 @@ void enqueue(Queue* queue, PackNumber* number)
 }
 
 
-PackNumber* dequeue(Queue* queue)
+PackNumber* dequeue(Queue* queue, int* flagDone, int* flagBufferOverflow)
 {
 
 	pthread_mutex_lock(&queue->mutex);				// Garante acesso exclusivo à região crítica.
@@ -135,6 +143,9 @@ PackNumber* dequeue(Queue* queue)
 	if (queue->size == 0)
 	{
 		pthread_cond_wait(&queue->empty, &queue->mutex);	// Esperar pela adição de um novo número.
+		if (*flagDone == 1 || *flagBufferOverflow == 1) {
+			return NULL;
+		}
 	}
 
 
@@ -249,7 +260,7 @@ void* generatorAction(void* arg)
 	Generator* g = (Generator*)arg;		// Recepcionando argumento passado pela thread_create().
 	while (1)
 	{
-		for (i = 2; i < *g->n; i++)
+		for (i = 2; i < *g->n + 1; i++)
 		{
 			// Criar pacote de número para ser analizado.
 			PackNumber* number = (PackNumber*)malloc(sizeof(PackNumber));
@@ -259,13 +270,17 @@ void* generatorAction(void* arg)
 			number->analyzerThread = -1;
 
 			// Envia o pacote para o Buffer de entrada da primeira thread.
-			enqueue(g->firstThreadBuffer, number);
+			printf("Number %4d sent.\n", number->value);
+			enqueue(g->firstThreadBuffer, number, 0, 0);
 
-			if (*(g->bufferOverflow))	// Se alguem estourou o Buffer, então encerrar a thread.
+			if (*(g->flagBufferOverflow))	// Se alguem estourou o Buffer, então encerrar a thread.
 			{
+				printf("(G-Detect Overflow)\n");
 				pthread_exit(0);	// Se alguem estourou o Buffer, então encerrar a thread.
 			}
 		}
+		printf("(G-Done)\n");
+		pthread_exit(0);	// Se alguem estourou o Buffer, então encerrar a thread.
 	}
 }
 
@@ -274,9 +289,23 @@ void* generatorAction(void* arg)
 void* analyzersAction(void* arg)
 {
 	Analyzer* a = (Analyzer*)arg;		// Recepcionando argumento passado pela thread_create().
+	printf("(A%d-Init)\n", a->thread_num);
 	while (1)
 	{
-		PackNumber* number = dequeue(a->communicationBufferInput);		// Pega o número no Buffer de Entrada para análise.
+		PackNumber* number = dequeue(a->communicationBufferInput, a->flagDone, a->flagBufferOverflow);		// Pega o número no Buffer de Entrada para análise.
+		
+		if (!number) {
+			if (*a->flagDone == 1) {
+				printf("(A%d-Done)\n", a->thread_num);
+			}
+			else {
+				printf("(A%d Found Overflow)\n", a->thread_num);
+			}
+			pthread_cond_signal(&a->communicationBufferOutput->empty);
+			pthread_cond_signal(&a->communicationBufferOutput->full);
+			pthread_exit(0);
+		}
+
 		if (number->round <= *(a->internalBufferSize)) // Se valor esta dentro do internalBuffer nessa rodada, então:
 		{
 			if (a->internalBuffer[number->round] == -1)	// Se não há números no internalBuffer da rodada, então é primo;
@@ -284,7 +313,7 @@ void* analyzersAction(void* arg)
 				a->internalBuffer[number->round] = number->value;
 				number->isPrime = 0;
 				number->analyzerThread = a->thread_num;
-				enqueue(a->receiverBuffer, number);
+				enqueue(a->receiverBuffer, number, 0, 0);
 				sem_post(a->sendToReceiver);
 			}
 
@@ -292,29 +321,28 @@ void* analyzersAction(void* arg)
 			{
 				number->isPrime = a->internalBuffer[number->round];
 				number->analyzerThread = a->thread_num;
-				enqueue(a->receiverBuffer, number);
+				enqueue(a->receiverBuffer, number, 0, 0);
 				sem_post(a->sendToReceiver);
 			}
 
-			else	// Se o não há um número no internalBuffer da rodada, porém não é divisível por ele, então é enviado para a próxima thread.
+			else	// Se há um número no internalBuffer da rodada, porém não é divisível por ele, então é enviado para a próxima thread.
 			{
 				if (a->isLast == 1) // Se essa thread for a última, marcar o pacote do número que está na próxima rodada.
 				{
 					number->round++;
 				}
-				enqueue(a->communicationBufferOutput, number);
+				enqueue(a->communicationBufferOutput, number, a->flagDone, a->flagBufferOverflow);
 			}
 		}
 		else		// OVerflow.
 		{
-			*(a->bufferOverflow) = 1;
+			printf("(A%d) OVERFLOW - Number: %d\n", a->thread_num, number->value);
+			*(a->flagBufferOverflow) = 1;
 			number->isPrime = -1;
 			number->analyzerThread = a->thread_num;
-			enqueue(a->receiverBuffer, number);
-			pthread_exit(0);
-		}
-		if (*(a->bufferOverflow) == 1)
-		{
+			enqueue(a->receiverBuffer, number, 0, 0);
+			pthread_cond_signal(&a->communicationBufferOutput->empty);
+			pthread_cond_signal(&a->communicationBufferOutput->full);
 			pthread_exit(0);
 		}
 	}
@@ -334,18 +362,29 @@ void* receiverAction(void* arg)
 		while (find(r->receiverBuffer, nextToPrint) == 1)
 		{
 			PackNumber* number = findAndGet(r->receiverBuffer, nextToPrint);
+			printf("%d\n", number->value);
 
 			if (number->isPrime == 0)
 			{
-				printf("%d is prime in thread %d at round %d\n", number->value, number->analyzerThread, number->round);
+				printf("%4d is prime in thread %2d at round %2d\n", number->value, number->analyzerThread, number->round);
 			}
 			else if (number->isPrime > 1)
 			{
-				printf("%d divided by %d in thread %d at round %d\n", number->value, number->isPrime, number->analyzerThread, number->round);
+				printf("%4d divided by %2d in thread %2d at round %2d\n", number->value, number->isPrime, number->analyzerThread, number->round);
 			}
 			else if (number->isPrime == -1)
 			{
-				printf("%d CAUSED INTERNAL BUFFER OVERFLOW IN thread %d at round %d\n", number->value, number->analyzerThread, number->round);
+				printf("%4d CAUSED INTERNAL BUFFER OVERFLOW IN thread %2d at round %2d\n", number->value, number->analyzerThread, number->round);
+				pthread_exit(0);	// Se alguem estourou o Buffer, então encerrar a thread
+			}
+			if (nextToPrint == *r->n)
+			{
+				printf("(R-Done)\n");
+				*(r->flagDone) = 1;
+				for (int i = 0; i < *r->m; i++) {
+					printf("Destravamento %d\n", i);
+					pthread_cond_signal(&r->analyzers[i].communicationBufferOutput->empty);
+				}
 				pthread_exit(0);	// Se alguem estourou o Buffer, então encerrar a thread
 			}
 
@@ -362,13 +401,12 @@ void* receiverAction(void* arg)
 int main(int argc, char** argv)
 {
 	// Declarações na Main.
-	int n, m, k, x, i = 0, bufferOverflow = 0;
+	int n, m, k, x, i = 0, flagBufferOverflow = 0, flagDone = 0;
 	sem_t sendToReceiver;
-
 
 	if (argc != 5)
 	{
-		printf("use ./pipelinethreads.exe <N_analyze_numbers> <M_analyze_threads> <K_comunication_buffer_size> <X_internal_buffer>.\n");
+		printf("use ./pipelinethreads.exe <N_analyze_numbers> <M_analyze_threads> <K_communication_buffer_size> <X_internal_buffer>.\n");
 		return 0;
 	}
 
@@ -382,28 +420,9 @@ int main(int argc, char** argv)
 	sem_init(&sendToReceiver, 0, 0);
 
 
-	// Criando a thread Receptora.
-	Receiver* receiverThread = (Receiver*)malloc(sizeof(Receiver));
-	if (receiverThread == NULL)
-	{
-		return -1;
-	}
-	Queue* receiverBuffer = (Queue*)malloc(sizeof(Queue));
-	initQueue(receiverBuffer, &n);
-	receiverThread->receiverBuffer = receiverBuffer;
-	receiverThread->sendToReceiver = &sendToReceiver;
-	pthread_create(&receiverThread->threadId, NULL, receiverAction, receiverThread);
-
-
-	// Criando os pacotes das threads de Análise.
-	Analyzer* analyzers = (Analyzer*)malloc(sizeof(Analyzer) * m);
-	if (analyzers == NULL)
-	{
-		return -1;
-	}
 
 	// Criar a Queue de comunicação compartilhado entre as threads de análise.
-	int commBuffSize = k - 1;
+	int commBuffSize = k;
 	Queue* communicationBuffer = (Queue*)malloc(sizeof(Queue) * m);
 	if (communicationBuffer == NULL)
 	{
@@ -413,7 +432,16 @@ int main(int argc, char** argv)
 	{
 		initQueue(&communicationBuffer[i], &commBuffSize);
 	}
+	
+	// Criando a Queue de recebimendo dos números analizados para a receptora.
+	Queue* receiverBuffer = (Queue*)malloc(sizeof(Queue));
 
+	// Criando os pacotes das threads de Análise.
+	Analyzer* analyzers = (Analyzer*)malloc(sizeof(Analyzer) * m);
+	if (analyzers == NULL)
+	{
+		return -1;
+	}
 
 	// Criar o Buffer interno de armazenamento para os número primos encontrados.
 	int** internalBuffer;
@@ -433,9 +461,8 @@ int main(int argc, char** argv)
 		}
 	}
 
-
 	// Populando as threads de análise.
-	int interBuffSize = x - 1;
+	int interBuffSize = x;
 	for (i = 0; i < m; i++)
 	{
 		(analyzers + i)->sendToReceiver = &sendToReceiver;
@@ -445,10 +472,29 @@ int main(int argc, char** argv)
 		(analyzers + i)->communicationBufferInput = &communicationBuffer[i];
 		(analyzers + i)->communicationBufferOutput = &communicationBuffer[(i + 1) % m];
 		(analyzers + i)->receiverBuffer = receiverBuffer;
-		(analyzers + i)->bufferOverflow = &bufferOverflow;
+		(analyzers + i)->flagBufferOverflow = &flagBufferOverflow;
+		(analyzers + i)->flagDone = &flagDone;
 		(analyzers + i)->internalBuffer = internalBuffer[i];
 	}
 
+	// Criando a thread Receptora.
+	Receiver* receiverThread = (Receiver*)malloc(sizeof(Receiver));
+
+	if (receiverThread == NULL)
+	{
+		return -1;
+	}
+	initQueue(receiverBuffer, &n);
+	receiverThread->receiverBuffer = receiverBuffer;
+	receiverThread->sendToReceiver = &sendToReceiver;
+	receiverThread->n = &n;
+	receiverThread->m = &m;
+	receiverThread->flagDone = &flagDone;
+	receiverThread->analyzers = analyzers;
+
+
+	// Criando a thread receptora.
+	pthread_create(&receiverThread->threadId, NULL, receiverAction, receiverThread);
 
 	// Criando as threads de análise.
 	for (i = 0; i < m; i++)
@@ -466,7 +512,7 @@ int main(int argc, char** argv)
 	// Populando a thread geradora.
 	generatorThread->n = &n;
 	generatorThread->firstThreadBuffer = (analyzers + 0)->communicationBufferInput;
-	generatorThread->bufferOverflow = &bufferOverflow;
+	generatorThread->flagBufferOverflow = &flagBufferOverflow;
 
 	pthread_create(&(generatorThread->threadId), NULL, generatorAction, generatorThread);
 
@@ -496,7 +542,7 @@ int main(int argc, char** argv)
 	// Destruir o semáforo compartilhado.
 	sem_destroy(&sendToReceiver);
 
-
+	printf("Final do programa");
 	return 0;
 }
 
