@@ -53,7 +53,7 @@ typedef struct	generator	// Pacote da Thread Geradora.
 {
 	pthread_t			threadId;
 	int*				n;							// Quantidade de números a serem analizados.
-	int*				flagBufferOverflow;				// Avisa se o Buffer de alguma thread deu overflow. Sem Overflow = 0, com Overflow = 1.
+	int*				flagBufferOverflow;			// Avisa se o Buffer de alguma thread deu overflow. Sem Overflow = 0, com Overflow = 1.
 	Queue*				firstThreadBuffer;			// Buffer da primeira thread.
 } Generator;
 
@@ -270,10 +270,10 @@ void* generatorAction(void* arg)
 			number->analyzerThread = -1;
 
 			// Envia o pacote para o Buffer de entrada da primeira thread.
+			enqueue(g->firstThreadBuffer, number, 0, g->flagBufferOverflow);
 			printf("Number %4d sent.\n", number->value);
-			enqueue(g->firstThreadBuffer, number, 0, 0);
 
-			if (*(g->flagBufferOverflow))	// Se alguem estourou o Buffer, então encerrar a thread.
+			if (*g->flagBufferOverflow == 1)	// Se alguem estourou o Buffer, então encerrar a thread.
 			{
 				printf("(G-Detect Overflow)\n");
 				pthread_exit(0);	// Se alguem estourou o Buffer, então encerrar a thread.
@@ -341,6 +341,7 @@ void* analyzersAction(void* arg)
 			number->isPrime = -1;
 			number->analyzerThread = a->thread_num;
 			enqueue(a->receiverBuffer, number, 0, 0);
+			sem_post(a->sendToReceiver);
 			pthread_cond_signal(&a->communicationBufferOutput->empty);
 			pthread_cond_signal(&a->communicationBufferOutput->full);
 			pthread_exit(0);
