@@ -140,7 +140,14 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="main.C" />
+    <ClCompile Include="main.c" />
+    <ClCompile Include="queue.c" />
+    <ClCompile Include="threads.c" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="queue.h" />
+    <ClInclude Include="threads.h" />
+    <ClInclude Include="types.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
