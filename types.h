@@ -50,7 +50,8 @@ typedef struct analyzer {
     int thread_num;                     // Indica o número da thread.	
     int isLast;                         // Identifica se a thread é a última Thread.
     int* internalBufferSize;            // Tamanho do internalBuffer;
-    int* internalBuffer;                // Buffer interno para números primos encontrados.
+    int* internalBuffer;    
+    // Buffer interno para números primos encontrados.
     int* flagBufferOverflow;            // Avisa se o Buffer de alguma thread deu overflow. Sem Overflow = 0, com Overflow = 1.
     int* flagDone;                      // Avisa as Threads que o trabalho está finalizado.
     Queue* communicationBufferInput;    // Buffer de comunicação com a thread de análise anterior.
